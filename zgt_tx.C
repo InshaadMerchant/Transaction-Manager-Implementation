@@ -136,8 +136,36 @@ void *writetx(void *arg){ //do the operations for writing; similar to readTx
 
 // common method to process read/write: Just a suggestion
 
-void *process_read_write_operation(long tid, long obno,  int count, char mode){
-  
+void *process_read_write_operation(long tid, long obno,  int count, char mode)
+{
+  zgt_p(0);
+  zgt_tx *tx = get_tx(tid);
+  zgt_v(0);
+
+  if(tx == NULL) 
+  {
+    printf(":::Tx with tid: %d does not exist.\n", tid);
+    fflush(stdout);
+    fprintf(ZGT_Sh->logfile, "Tx with tid: %d does not exist. skipping operation\n", tid);
+    fflush(ZGT_Sh->logfile);
+    return NULL;
+  }
+
+  if(mode == READ_MODE) 
+  { // READ operation
+    while(tx->set_lock(tid, tx->sgno, obno, count, tx->Txtype == READ_MODE ? SHARED_LOCK : EXCLUSIVE_LOCK) == -1) {} // lock type based on transaction type
+
+  } 
+  else if(mode == WRITE_MODE) 
+  { // WRITE operation
+    while(tx->set_lock(tid, tx->sgno, obno, count, EXCLUSIVE_LOCK) == -1) {}
+  }
+
+  // once lock is retrieved, perform operation if not aborted
+  if(tx->status != TR_ABORT) 
+  {
+    tx->perform_read_write_operation(tid, obno, mode);
+  }
   
 }
 
@@ -179,6 +207,43 @@ void *committx(void *arg)
 void *do_commit_abort_operation(long t, char status){
 
   // write your code
+  zgt_p(0);
+  zgt_tx *tx = get_tx(tid);
+  if(tx == NULL) {
+    printf(":::Tx with tid: %d does not exist.\n", tid);
+    fflush(stdout);
+    fprintf(ZGT_Sh->logfile, "Tx with tid: %d does not exist. skipping operation\n", tid);
+    fflush(ZGT_Sh->logfile);
+    return NULL;
+  }
+
+  // housekeeping
+  const char* Operation;
+  if(status == COMMIT) {
+    Operation = "CommitTx";
+    tx->status = TR_END;
+  } else if(status == ABORT) {
+    Operation = "AbortTx";
+    tx->status = TR_ABORT;
+  }
+
+  // logging
+  fprintf(ZGT_Sh->logfile, "T%d\t%c\t%s\t",
+           tid, NOT_BEGIN_TX, Operation);
+  
+  // release resources
+  get_tx(tid)->free_locks();
+  fflush(ZGT_Sh->logfile); // finish logging. free_locks() outputs
+  if(tx->semno != -1) {
+    // wake up each of the waiting threads
+    int i;
+    int num_waiting = zgt_nwait(tx->semno);
+    for(i=0; i<num_waiting; i++) {
+      zgt_v(tx->semno);
+    }
+  }
+  tx->remove_tx();
+  zgt_v(0);
 }
 
 int zgt_tx::remove_tx ()
@@ -211,6 +276,72 @@ int zgt_tx::set_lock(long tid1, long sgno1, long obno1, int count, char lockmode
   //if successful  return(0); else -1
   
     //write your code
+    bool gainedLock = false;
+
+    zgt_p(0);
+    zgt_hlink *ob = ZGT_Ht->find(this->sgno, obno);
+  
+    // trying to gain a lock
+    if(lockmode == SHARED_LOCK) 
+    {
+      if(ob == NULL) 
+      { // if doesn't exist in ht
+        while(ZGT_Ht->add(this, this->sgno, obno, SHARED_LOCK) == -1) {}
+  
+        gainedLock = true;
+  
+      } 
+      else 
+      { // if exists
+        if(ob->lockmode == SHARED_LOCK) 
+        { // if shared
+          while(ZGT_Ht->add(this, this->sgno, obno, SHARED_LOCK) == -1) {} // make entry for current transaction
+          gainedLock = true;
+  
+        } 
+        else 
+        {  // if exclusive
+          // unable to lock due to an exclusive lock already existing
+          // unless it has the exclusive lock (this would only be applicable in
+          // a system where a transaction could have differnt types of locks)
+          gainedLock = ob->tid == tid;
+        }
+      }
+    } 
+    else if(lockmode == EXCLUSIVE_LOCK) 
+    {
+      if(ob == NULL) 
+      { // if doesn't exist in ht
+        while(ZGT_Ht->add(this, this->sgno, obno, EXCLUSIVE_LOCK) == -1) {}
+        gainedLock = true;
+  
+      } 
+      else 
+      { // if exists
+        // unable to lock due to requiring an exclusive lock when a lock already exists
+        // unless it has the exclusive lock
+        gainedLock = ob->tid == tid;
+      }
+    }
+  
+    // if set, continue. if not, wait
+    if(gainedLock) 
+    {
+      this->status = TR_ACTIVE;
+      zgt_v(0);
+      return 0;
+  
+    } 
+    else 
+    {
+      this->status = TR_WAIT;
+      
+      zgt_tx *other = get_tx(ob->tid);
+      other->semno = ob->tid;
+      zgt_v(0);
+      zgt_p(other->semno); // wait for holding transaction to release
+      return -1;
+    }
   
 }
 
@@ -331,6 +462,34 @@ void zgt_tx::print_lock(){
 void zgt_tx::perform_read_write_operation(long tid,long obno, char lockmode){
   
   // write your code
+  // logging variables 
+  const char* Operation;
+  const char* LockType;
+  const char* Status = "Granted"; // guarenteed 'granted' from process_read_write_operation()
+
+  if(lockmode == READ_MODE) 
+  {
+    ZGT_Sh->objarray[obno]->value -= 4; // if read, decrement by 4.
+    // Note: This is stated in the project description. Decrementing when we read is unconventional.
+
+    Operation = "ReadTx";
+    LockType = "ReadLock";
+  } 
+  else 
+  {
+    ZGT_Sh->objarray[obno]->value += 7; // if write, increment by 7.
+
+    Operation = "WriteTx";
+    LockType = "WriteLock";
+  }
+
+  // Write to log
+  fprintf(ZGT_Sh->logfile, "T%d\t%c\t%s\t\t%d:%d:%-4.d\t\t%s\t%s\t%c\n",
+           tid, NOT_BEGIN_TX, Operation, obno, ZGT_Sh->objarray[obno]->value, ZGT_Sh->optime[tid], LockType, Status, this->status);
+  fflush(ZGT_Sh->logfile);
+
+  // sleep for optime in nanoseconds
+  usleep(ZGT_Sh->optime[tid]);
 
 }
 
