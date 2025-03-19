@@ -1,0 +1,16 @@
+---------------------------------------------------------------------------
+TxId	Txtype	Operation	ObId:Obvalue:optime	LockType	Status		TxStatus
+T1	R 	BeginTx
+T2	W 	BeginTx
+T1	 	ReadTx		1:-4:14807		ReadLock	Granted	P
+T2	 	ReadTx		8:-4:1837		ReadLock	Granted	P
+T2	 	ReadTx		7:-4:1837		ReadLock	Granted	P
+T2	 	WriteTx		6:7:1837		WriteLock	Granted	P
+T2	 	WriteTx		5:7:1837		WriteLock	Granted	P
+T2	 	CommitTx
+5 : 7, 6 : 7, 7 : -4, 8 : -4, 
+T1	 	ReadTx		2:-4:14807		ReadLock	Granted	P
+T1	 	ReadTx		3:-4:14807		ReadLock	Granted	P
+T1	 	ReadTx		4:-4:14807		ReadLock	Granted	P
+T1	 	CommitTx
+4 : -4, 3 : -4, 2 : -4, 1 : -4, 
